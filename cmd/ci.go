@@ -59,83 +59,96 @@ var ciCmd = &cobra.Command{
 }
 
 func jobsLayout(pid interface{}, sha string) func(*gocui.Gui) error {
-	jobs, err := lab.CIJobs(pid, sha)
-	if err != nil {
-		log.Fatal(err)
-	}
 	return func(g *gocui.Gui) error {
-		maxX, maxY := g.Size()
-		var (
-			stages    = 0
-			lastStage = ""
-		)
-		// get the number of stages
-		for _, j := range jobs {
-			if j.Stage != lastStage {
-				stages++
+		jobsCh := make([]gitlab.Job)
+		duration := time.Second * 5
+		ticker := time.NewTimer(duration)
+		for {
+			var jobs []gitlab.Job
+			select {
+			case jobs = <-jobsCh:
+			case <-ticker.C:
+				go func() {
+					jobs, err := lab.CIJobs(pid, sha)
+					if err != nil {
+						log.Fatal(err)
+					}
+					jobsCh <- jobs
+				}()
 			}
-		}
-		lastStage = ""
-		var (
-			rowIdx   = 0
-			stageIdx = 0
-		)
-		for _, j := range jobs {
-			// The scope of jobs to show, one or array of: created, pending, running,
-			// failed, success, canceled, skipped; showing all jobs if none provided
-			if j.Stage != lastStage {
-				rowIdx = 0
-				stageIdx++
-				lastStage = j.Stage
-				if v, err := g.SetView("stage-"+j.Stage,
-					maxX*stageIdx/(stages+1)-7, maxY/2-4,
-					maxX*stageIdx/(stages+1)+7, maxY/2-2); err != nil {
+			maxX, maxY := g.Size()
+			var (
+				stages    = 0
+				lastStage = ""
+			)
+			// get the number of stages
+			for _, j := range jobs {
+				if j.Stage != lastStage {
+					stages++
+				}
+			}
+			lastStage = ""
+			var (
+				rowIdx   = 0
+				stageIdx = 0
+			)
+			for _, j := range jobs {
+				// The scope of jobs to show, one or array of: created, pending, running,
+				// failed, success, canceled, skipped; showing all jobs if none provided
+				if j.Stage != lastStage {
+					rowIdx = 0
+					stageIdx++
+					lastStage = j.Stage
+					if v, err := g.SetView("stage-"+j.Stage,
+						maxX*stageIdx/(stages+1)-7, maxY/2-4,
+						maxX*stageIdx/(stages+1)+7, maxY/2-2); err != nil {
+						if err != gocui.ErrUnknownView {
+							return err
+						}
+						fmt.Fprintln(v, j.Stage)
+					}
+				} else {
+					rowIdx++
+				}
+				if v, err := g.SetView("jobs-"+j.Name,
+					maxX*stageIdx/(stages+1)-7, maxY/2+(rowIdx*6),
+					maxX*stageIdx/(stages+1)+7, maxY/2+2+(rowIdx*6)); err != nil {
 					if err != gocui.ErrUnknownView {
 						return err
 					}
-					fmt.Fprintln(v, j.Stage)
+					var statChar rune
+					switch j.Status {
+					case "success":
+						v.FgColor = gocui.ColorGreen
+						statChar = '✔'
+					case "failed":
+						v.FgColor = gocui.ColorRed
+						statChar = '✘'
+					case "running":
+						v.FgColor = gocui.ColorBlue
+						statChar = '●'
+					case "pending":
+						v.FgColor = gocui.ColorYellow
+						statChar = '●'
+					}
+					retryChar := '⟳'
+					_ = retryChar
+					fmt.Fprintf(v, "%c %s\n", statChar, j.Name)
 				}
-			} else {
-				rowIdx++
 			}
-			if v, err := g.SetView("jobs-"+j.Name,
-				maxX*stageIdx/(stages+1)-7, maxY/2+(rowIdx*6),
-				maxX*stageIdx/(stages+1)+7, maxY/2+2+(rowIdx*6)); err != nil {
-				if err != gocui.ErrUnknownView {
+			for i, k := 0, 1; k < len(jobs); i, k = i+1, k+1 {
+				v1, err := g.View("jobs-" + jobs[i].Name)
+				if err != nil {
 					return err
 				}
-				var statChar rune
-				switch j.Status {
-				case "success":
-					v.FgColor = gocui.ColorGreen
-					statChar = '✔'
-				case "failed":
-					v.FgColor = gocui.ColorRed
-					statChar = '✘'
-				case "running":
-					v.FgColor = gocui.ColorBlue
-					statChar = '●'
-				case "pending":
-					v.FgColor = gocui.ColorYellow
-					statChar = '●'
+				v2, err := g.View("jobs-" + jobs[k].Name)
+				if err != nil {
+					return err
 				}
-				retryChar := '⟳'
-				_ = retryChar
-				fmt.Fprintf(v, "%c %s\n", statChar, j.Name)
+				connect(v1, v2)
 			}
+			return nil
 		}
-		for i, k := 0, 1; k < len(jobs); i, k = i+1, k+1 {
-			v1, err := g.View("jobs-" + jobs[i].Name)
-			if err != nil {
-				return err
-			}
-			v2, err := g.View("jobs-" + jobs[k].Name)
-			if err != nil {
-				return err
-			}
-			connect(v1, v2)
-		}
-		return nil
 	}
 }
 
