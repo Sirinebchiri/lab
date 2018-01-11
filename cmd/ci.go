@@ -3,9 +3,11 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"time"
 
 	termbox "github.com/nsf/termbox-go"
 	"github.com/spf13/cobra"
+	"github.com/xanzy/go-gitlab"
 	"github.com/zaquestion/gocui"
 	"github.com/zaquestion/lab/internal/git"
 	lab "github.com/zaquestion/lab/internal/gitlab"
@@ -46,7 +48,9 @@ var ciCmd = &cobra.Command{
 		}
 		defer g.Close()
 
-		g.SetManagerFunc(jobsLayout(project.ID, sha))
+		jobsCh := make(chan []gitlab.Job)
+		go updateJobs(jobsCh, project.ID, sha)
+		g.SetManagerFunc(jobsLayout(jobsCh))
 
 		if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
 			log.Panicln(err)
@@ -58,97 +62,93 @@ var ciCmd = &cobra.Command{
 	},
 }
 
-func jobsLayout(pid interface{}, sha string) func(*gocui.Gui) error {
+func updateJobs(jobsCh chan []gitlab.Job, pid interface{}, sha string) {
+	for {
+		jobs, err := lab.CIJobs(pid, sha)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// if this deadlocks call g.Update()
+		jobsCh <- jobs
+		time.Sleep(time.Second * 5)
+	}
+}
+
+func jobsLayout(jobsCh chan []gitlab.Job) func(*gocui.Gui) error {
 	return func(g *gocui.Gui) error {
-		jobsCh := make([]gitlab.Job)
-		duration := time.Second * 5
-		ticker := time.NewTimer(duration)
-		for {
-			var jobs []gitlab.Job
-			select {
-			case jobs = <-jobsCh:
-			case <-ticker.C:
-				go func() {
-					jobs, err := lab.CIJobs(pid, sha)
-					if err != nil {
-						log.Fatal(err)
-					}
-					jobsCh <- jobs
-				}()
-			}
-			maxX, maxY := g.Size()
-			var (
-				stages    = 0
-				lastStage = ""
-			)
-			// get the number of stages
-			for _, j := range jobs {
-				if j.Stage != lastStage {
-					stages++
-				}
-			}
+		jobs := <-jobsCh
+		maxX, maxY := g.Size()
+		var (
+			stages    = 0
 			lastStage = ""
-			var (
-				rowIdx   = 0
-				stageIdx = 0
-			)
-			for _, j := range jobs {
-				// The scope of jobs to show, one or array of: created, pending, running,
-				// failed, success, canceled, skipped; showing all jobs if none provided
-				if j.Stage != lastStage {
-					rowIdx = 0
-					stageIdx++
-					lastStage = j.Stage
-					if v, err := g.SetView("stage-"+j.Stage,
-						maxX*stageIdx/(stages+1)-7, maxY/2-4,
-						maxX*stageIdx/(stages+1)+7, maxY/2-2); err != nil {
-						if err != gocui.ErrUnknownView {
-							return err
-						}
-						fmt.Fprintln(v, j.Stage)
-					}
-				} else {
-					rowIdx++
-				}
-				if v, err := g.SetView("jobs-"+j.Name,
-					maxX*stageIdx/(stages+1)-7, maxY/2+(rowIdx*6),
-					maxX*stageIdx/(stages+1)+7, maxY/2+2+(rowIdx*6)); err != nil {
+		)
+		// get the number of stages
+		for _, j := range jobs {
+			if j.Stage != lastStage {
+				stages++
+			}
+		}
+		lastStage = ""
+		var (
+			rowIdx   = 0
+			stageIdx = 0
+		)
+		for _, j := range jobs {
+			// The scope of jobs to show, one or array of: created, pending, running,
+			// failed, success, canceled, skipped; showing all jobs if none provided
+			if j.Stage != lastStage {
+				rowIdx = 0
+				stageIdx++
+				lastStage = j.Stage
+				if v, err := g.SetView("stage-"+j.Stage,
+					maxX*stageIdx/(stages+1)-7, maxY/2-4,
+					maxX*stageIdx/(stages+1)+7, maxY/2-2); err != nil {
 					if err != gocui.ErrUnknownView {
 						return err
 					}
-					var statChar rune
-					switch j.Status {
-					case "success":
-						v.FgColor = gocui.ColorGreen
-						statChar = '✔'
-					case "failed":
-						v.FgColor = gocui.ColorRed
-						statChar = '✘'
-					case "running":
-						v.FgColor = gocui.ColorBlue
-						statChar = '●'
-					case "pending":
-						v.FgColor = gocui.ColorYellow
-						statChar = '●'
-					}
-					retryChar := '⟳'
-					_ = retryChar
-					fmt.Fprintf(v, "%c %s\n", statChar, j.Name)
+					fmt.Fprintln(v, j.Stage)
 				}
+			} else {
+				rowIdx++
 			}
-			for i, k := 0, 1; k < len(jobs); i, k = i+1, k+1 {
-				v1, err := g.View("jobs-" + jobs[i].Name)
-				if err != nil {
+			if v, err := g.SetView("jobs-"+j.Name,
+				maxX*stageIdx/(stages+1)-7, maxY/2+(rowIdx*6),
+				maxX*stageIdx/(stages+1)+7, maxY/2+2+(rowIdx*6)); err != nil {
+				if err != gocui.ErrUnknownView {
 					return err
 				}
-				v2, err := g.View("jobs-" + jobs[k].Name)
-				if err != nil {
-					return err
+				var statChar rune
+				switch j.Status {
+				case "success":
+					v.FgColor = gocui.ColorGreen
+					statChar = '✔'
+				case "failed":
+					v.FgColor = gocui.ColorRed
+					statChar = '✘'
+				case "running":
+					v.FgColor = gocui.ColorBlue
+					statChar = '●'
+				case "pending":
+					v.FgColor = gocui.ColorYellow
+					statChar = '●'
 				}
-				connect(v1, v2)
+				retryChar := '⟳'
+				_ = retryChar
+				fmt.Fprintf(v, "%c %s\n", statChar, j.Name)
 			}
-			return nil
 		}
+		for i, k := 0, 1; k < len(jobs); i, k = i+1, k+1 {
+			v1, err := g.View("jobs-" + jobs[i].Name)
+			if err != nil {
+				return err
+			}
+			v2, err := g.View("jobs-" + jobs[k].Name)
+			if err != nil {
+				return err
+			}
+			connect(v1, v2)
+		}
+		return nil
 	}
 }
 
@@ -159,6 +159,7 @@ func connect(v1 *gocui.View, v2 *gocui.View) {
 	w, h := v1.Bounding()
 	dx, dy := x2-x1, y2-y1
 
+	// dy != 0 means the last stage had multple jobs
 	if dy != 0 && dx != 0 {
 		hline(x1+w, y2+h/2, dx-w)
 		termbox.SetCell(x1+w+3, y2+h/2, '┳', termbox.ColorDefault, termbox.ColorDefault)
@@ -169,9 +170,20 @@ func connect(v1 *gocui.View, v2 *gocui.View) {
 		return
 	}
 
+	cells := termbox.CellBuffer()
+	tw, _ := termbox.Size()
+
+	// '┣' '┫'
+	// TODO: fix drawing the last stage (don't draw right side of box)
+	// TODO: fix drawing the first stage (don't draw left side of box)
+
 	// Drawing a job in the same stage
 	// left of view
-	termbox.SetCell(x2-3, y1+h/2, '┳', termbox.ColorDefault, termbox.ColorDefault)
+	if cells[(y1+h/2)*tw+x2-3].Ch == '┗' {
+		termbox.SetCell(x2-3, y1+h/2, '┣', termbox.ColorDefault, termbox.ColorDefault)
+	} else {
+		termbox.SetCell(x2-3, y1+h/2, '┳', termbox.ColorDefault, termbox.ColorDefault)
+	}
 
 	termbox.SetCell(x2-1, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
 	termbox.SetCell(x2-2, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
@@ -181,7 +193,9 @@ func connect(v1 *gocui.View, v2 *gocui.View) {
 	vline(x2+w+3, y1+h, dy-1)
 
 	// right of view
-
+	if cells[(y1+h/2)*tw+x2+w+3].Ch == '┛' {
+		termbox.SetCell(x2+w+3, y1+h/2, '┫', termbox.ColorDefault, termbox.ColorDefault)
+	}
 	termbox.SetCell(x2+w+1, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
 	termbox.SetCell(x2+w+2, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
 	termbox.SetCell(x2+w+3, y2+h/2, '┛', termbox.ColorDefault, termbox.ColorDefault)
