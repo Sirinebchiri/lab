@@ -6,9 +6,11 @@ import (
 	"time"
 
 	termbox "github.com/nsf/termbox-go"
+	"github.com/rivo/tview"
 	"github.com/spf13/cobra"
 	"github.com/xanzy/go-gitlab"
 	"github.com/zaquestion/gocui"
+
 	"github.com/zaquestion/lab/internal/git"
 	lab "github.com/zaquestion/lab/internal/gitlab"
 )
@@ -39,6 +41,10 @@ var ciCmd = &cobra.Command{
 		}
 		sha, err := git.Sha("HEAD")
 		if err != nil {
+			log.Fatal(err)
+		}
+
+		if err := tview.NewApplication().Run(); err != nil {
 			log.Fatal(err)
 		}
 
