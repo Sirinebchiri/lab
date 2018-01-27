@@ -5,9 +5,11 @@ import (
 	"log"
 	"time"
 
+	"github.com/gdamore/tcell"
 	termbox "github.com/nsf/termbox-go"
 	"github.com/rivo/tview"
 	"github.com/spf13/cobra"
+
 	"github.com/xanzy/go-gitlab"
 	"github.com/zaquestion/gocui"
 
@@ -43,28 +45,35 @@ var ciCmd = &cobra.Command{
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		if err := tview.NewApplication().Run(); err != nil {
+		root := tview.NewBox().SetBorder(true)
+		if err := tview.NewApplication().SetRoot(root, true).Run(); err != nil {
 			log.Fatal(err)
 		}
-
-		g, err := gocui.NewGui(gocui.OutputNormal)
-		if err != nil {
-			log.Panicln(err)
-		}
-		defer g.Close()
-
+		boxes = make(map[string]*tview.Box)
 		jobsCh := make(chan []gitlab.Job)
 		go updateJobs(jobsCh, project.ID, sha)
-		g.SetManagerFunc(jobsLayout(jobsCh))
+		jobsLayout(jobsCh, root)()
+		// box.Draw(
 
-		if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
-			log.Panicln(err)
-		}
+		/*
+			g, err := gocui.NewGui(gocui.OutputNormal)
+			if err != nil {
+				log.Panicln(err)
+			}
+			defer g.Close()
 
-		if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
-			log.Panicln(err)
-		}
+			jobsCh := make(chan []gitlab.Job)
+			go updateJobs(jobsCh, project.ID, sha)
+			g.SetManagerFunc(jobsLayout(jobsCh))
+
+			if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+				log.Panicln(err)
+			}
+
+			if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
+				log.Panicln(err)
+			}
+		*/
 	},
 }
 
@@ -80,6 +89,97 @@ func updateJobs(jobsCh chan []gitlab.Job, pid interface{}, sha string) {
 	}
 }
 
+var boxes map[string]*tview.Box
+
+func SetView(name string, x, y, w, h int) (*tview.Box, error) {
+	b, ok := boxes[name]
+	if !ok {
+		b = tview.NewBox()
+		boxes[name] = b
+	}
+	b.SetRect(x, y, w, h)
+	return b, nil
+}
+
+func jobsLayout(jobsCh chan []gitlab.Job, root *tview.Box) func() error {
+	return func() error {
+		jobs := <-jobsCh
+		_, _, maxX, maxY := root.GetRect()
+		var (
+			stages    = 0
+			lastStage = ""
+		)
+		// get the number of stages
+		for _, j := range jobs {
+			if j.Stage != lastStage {
+				stages++
+			}
+		}
+		lastStage = ""
+		var (
+			rowIdx   = 0
+			stageIdx = 0
+		)
+		for _, j := range jobs {
+			// The scope of jobs to show, one or array of: created, pending, running,
+			// failed, success, canceled, skipped; showing all jobs if none provided
+			if j.Stage != lastStage {
+				rowIdx = 0
+				stageIdx++
+				lastStage = j.Stage
+				if v, err := SetView("stage-"+j.Stage,
+					maxX*stageIdx/(stages+1), maxY/2,
+					14, 6); err != nil {
+					if err != gocui.ErrUnknownView {
+						return err
+					}
+					v.SetTitle(j.Stage)
+				}
+			} else {
+				rowIdx++
+			}
+			if v, err := SetView("jobs-"+j.Name,
+				maxX*stageIdx/(stages+1), maxY/2+(rowIdx*6),
+				14, 4); err != nil {
+				if err != gocui.ErrUnknownView {
+					return err
+				}
+				var statChar rune
+				switch j.Status {
+				case "success":
+					v.SetBorderColor(tcell.ColorGreen)
+					statChar = '✔'
+				case "failed":
+					v.SetBorderColor(tcell.ColorRed)
+					statChar = '✘'
+				case "running":
+					v.SetBorderColor(tcell.ColorBlue)
+					statChar = '●'
+				case "pending":
+					v.SetBorderColor(tcell.ColorYellow)
+					statChar = '●'
+				}
+				retryChar := '⟳'
+				_ = retryChar
+				v.SetTitle(fmt.Sprintf("%c %s\n", statChar, j.Name))
+			}
+		}
+		for i, k := 0, 1; k < len(jobs); i, k = i+1, k+1 {
+			v1, ok := boxes["jobs-"+jobs[i].Name]
+			if !ok {
+				log.Fatal("not okay")
+			}
+			v2, ok := boxes["jobs-"+jobs[k].Name]
+			if !ok {
+				log.Fatal("not okay")
+			}
+			connect(v1, v2)
+		}
+		return nil
+	}
+}
+
+/*
 func jobsLayout(jobsCh chan []gitlab.Job) func(*gocui.Gui) error {
 	return func(g *gocui.Gui) error {
 		jobs := <-jobsCh
@@ -157,12 +257,12 @@ func jobsLayout(jobsCh chan []gitlab.Job) func(*gocui.Gui) error {
 		return nil
 	}
 }
+*/
 
-func connect(v1 *gocui.View, v2 *gocui.View) {
-	x1, y1 := v1.Position()
-	x2, y2 := v2.Position()
+func connect(v1 *tview.Box, v2 *tview.Box) {
+	x1, y1, w, h := v1.GetRect()
+	x2, y2, _, _ := v2.GetRect()
 
-	w, h := v1.Bounding()
 	dx, dy := x2-x1, y2-y1
 
 	// dy != 0 means the last stage had multple jobs
@@ -176,8 +276,8 @@ func connect(v1 *gocui.View, v2 *gocui.View) {
 		return
 	}
 
-	cells := termbox.CellBuffer()
-	tw, _ := termbox.Size()
+	// cells := termbox.CellBuffer()
+	// tw, _ := termbox.Size()
 
 	// '┣' '┫'
 	// TODO: fix drawing the last stage (don't draw right side of box)
@@ -185,11 +285,13 @@ func connect(v1 *gocui.View, v2 *gocui.View) {
 
 	// Drawing a job in the same stage
 	// left of view
-	if cells[(y1+h/2)*tw+x2-3].Ch == '┗' {
-		termbox.SetCell(x2-3, y1+h/2, '┣', termbox.ColorDefault, termbox.ColorDefault)
-	} else {
-		termbox.SetCell(x2-3, y1+h/2, '┳', termbox.ColorDefault, termbox.ColorDefault)
-	}
+	/*
+		if cells[(y1+h/2)*tw+x2-3].Ch == '┗' {
+			termbox.SetCell(x2-3, y1+h/2, '┣', termbox.ColorDefault, termbox.ColorDefault)
+		} else {
+			termbox.SetCell(x2-3, y1+h/2, '┳', termbox.ColorDefault, termbox.ColorDefault)
+		}
+	*/
 
 	termbox.SetCell(x2-1, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
 	termbox.SetCell(x2-2, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
@@ -198,10 +300,12 @@ func connect(v1 *gocui.View, v2 *gocui.View) {
 	vline(x2-3, y1+h, dy-1)
 	vline(x2+w+3, y1+h, dy-1)
 
-	// right of view
-	if cells[(y1+h/2)*tw+x2+w+3].Ch == '┛' {
-		termbox.SetCell(x2+w+3, y1+h/2, '┫', termbox.ColorDefault, termbox.ColorDefault)
-	}
+	/*
+		// right of view
+		if cells[(y1+h/2)*tw+x2+w+3].Ch == '┛' {
+			termbox.SetCell(x2+w+3, y1+h/2, '┫', termbox.ColorDefault, termbox.ColorDefault)
+		}
+	*/
 	termbox.SetCell(x2+w+1, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
 	termbox.SetCell(x2+w+2, y2+h/2, '━', termbox.ColorDefault, termbox.ColorDefault)
 	termbox.SetCell(x2+w+3, y2+h/2, '┛', termbox.ColorDefault, termbox.ColorDefault)
@@ -221,9 +325,6 @@ func vline(x, y, l int) {
 	}
 }
 
-func quit(g *gocui.Gui, v *gocui.View) error {
-	return gocui.ErrQuit
-}
 func init() {
 	RootCmd.AddCommand(ciCmd)
 }
