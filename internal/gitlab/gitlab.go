@@ -329,3 +329,12 @@ func Lint(content string) (bool, error) {
 	}
 	return lint.Status == "valid", nil
 }
+
+// RepoCreate creates a new project on GitLab with a given
+func RepoCreate(opts *gitlab.CreateProjectOptions) (*gitlab.Project, error) {
+	p, _, err := lab.Projects.CreateProject(opts)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
